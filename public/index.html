@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tareas · demo de la API</title>
+  <style>
+    :root { --ink:#1d2a3a; --muted:#5d6b7a; --line:#d5dde6; --bg:#f6f8fb; --accent:#0f5e9c; --ok:#2f7d4f; --bad:#b3261e; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "Segoe UI", system-ui, sans-serif; color:var(--ink); background:var(--bg); }
+    main { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; display:grid; gap:1.5rem; grid-template-columns: 1fr 300px; }
+    h1 { grid-column: 1 / -1; margin:0; font-size:1.6rem; }
+    section { background:#fff; border:1px solid var(--line); border-radius:8px; padding:1rem 1.25rem; }
+    h2 { font-size:1.05rem; margin:0 0 .75rem; }
+    label { display:block; font-size:.85rem; color:var(--muted); margin:.5rem 0 .2rem; }
+    input, select, textarea { width:100%; padding:.5rem; border:1px solid var(--line); border-radius:6px; font:inherit; }
+    button { margin-top:.6rem; padding:.45rem .9rem; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+    button.secondary { background:#e8eef5; color:var(--ink); }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline:3px solid #8fc1ea; outline-offset:1px; }
+    ul { list-style:none; padding:0; margin:0; }
+    .task { border-top:1px solid var(--line); padding:.7rem 0; display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    .task strong { flex:1 1 200px; }
+    .task select { width:auto; }
+    #log li { font-size:.85rem; padding:.35rem 0; border-top:1px solid var(--line); }
+    #msg { min-height:1.2em; font-size:.9rem; }
+    .err { color:var(--bad); } .ok { color:var(--ok); }
+    @media (max-width: 760px) { main { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Mis tareas</h1>
+  <div>
+    <section id="authBox">
+      <h2>Inicia sesión</h2>
+      <label for="u">Usuario</label><input id="u" autocomplete="username">
+      <label for="p">Contraseña</label><input id="p" type="password" autocomplete="current-password">
+      <button onclick="auth('login')">Iniciar sesión</button>
+      <button class="secondary" onclick="auth('register')">Crear cuenta</button>
+    </section>
+
+    <section id="appBox" hidden>
+      <h2>Nueva tarea</h2>
+      <label for="t">Título</label><input id="t">
+      <label for="d">Descripción</label><textarea id="d" rows="2"></textarea>
+      <button onclick="createTask()">Crear tarea</button>
+      <button class="secondary" onclick="logout()">Cerrar sesión</button>
+      <h2 style="margin-top:1.25rem">Lista</h2>
+      <ul id="tasks"></ul>
+    </section>
+    <p id="msg"></p>
+  </div>
+
+  <section>
+    <h2>Eventos en tiempo real</h2>
+    <p style="font-size:.85rem;color:var(--muted);margin-top:0">Abre esta página en otra pestaña con el mismo usuario y verás aquí los cambios al instante.</p>
+    <ul id="log"></ul>
+  </section>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  let socket = null;
+  const $ = (id) => document.getElementById(id);
+
+  const show = (text, ok = true) => { $('msg').textContent = text; $('msg').className = ok ? 'ok' : 'err'; };
+
+  async function api(method, url, body) {
+    const res = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const data = res.status === 204 ? null : await res.json();
+    if (!res.ok) throw new Error(data.error.message + (data.error.details ? ' — ' + JSON.stringify(data.error.details) : ''));
+    return data;
+  }
+
+  async function auth(action) {
+    try {
+      await api('POST', `/api/auth/${action}`, { username: $('u').value, password: $('p').value });
+      enterApp();
+    } catch (e) { show(e.message, false); }
+  }
+
+  function enterApp() {
+    $('authBox').hidden = true; $('appBox').hidden = false; show('Sesión iniciada');
+    socket = io(); // se conecta con la cookie de sesión
+    ['task:created', 'task:updated', 'task:deleted'].forEach((ev) =>
+      socket.on(ev, (payload) => { logEvent(ev, payload); loadTasks(); }));
+    loadTasks();
+  }
+
+  function logEvent(ev, payload) {
+    const li = document.createElement('li');
+    li.textContent = `${new Date().toLocaleTimeString()} · ${ev} · ${payload.title || payload.id}`;
+    $('log').prepend(li);
+  }
+
+  async function loadTasks() {
+    const tasks = await api('GET', '/api/tasks');
+    $('tasks').replaceChildren(...tasks.map(renderTask));
+    if (!tasks.length) $('tasks').innerHTML = '<li>Aún no tienes tareas. Crea la primera arriba.</li>';
+  }
+
+  function renderTask(task) {
+    const li = document.createElement('li'); li.className = 'task';
+    const title = document.createElement('strong'); title.textContent = task.title;
+    const sel = document.createElement('select');
+    ['pendiente', 'en_progreso', 'completada'].forEach((s) => sel.add(new Option(s, s, false, s === task.status)));
+    sel.onchange = () => api('PATCH', `/api/tasks/${task.id}`, { status: sel.value, version: task.version })
+      .catch((e) => show(e.message, false));
+    const del = document.createElement('button'); del.className = 'secondary'; del.textContent = 'Eliminar';
+    del.onclick = () => api('DELETE', `/api/tasks/${task.id}`).catch((e) => show(e.message, false));
+    li.append(title, sel, del);
+    return li;
+  }
+
+  async function createTask() {
+    try {
+      await api('POST', '/api/tasks', { title: $('t').value, description: $('d').value });
+      $('t').value = ''; $('d').value = ''; show('Tarea creada');
+    } catch (e) { show(e.message, false); }
+  }
+
+  async function logout() {
+    await api('POST', '/api/auth/logout');
+    socket?.disconnect(); location.reload();
+  }
+
+  // Si ya hay sesión activa, entra directo
+  api('GET', '/api/auth/me').then(enterApp).catch(() => {});
+</script>
+</body>
+</html>
